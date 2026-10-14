@@ -16,6 +16,7 @@
    logged a warning and continued; callers decide what is fatal.
  */
 import { requestJson, type FetchLike } from "./http.js";
+import { ForgejoAdapter } from "./forgejo.js";
 import { parsePlatformBaseUrl, GITHUB_API_BASE } from "./urls.js";
 
 export type PublishPlatformName = "github" | "forgejo";
@@ -359,7 +360,8 @@ export class ForgejoPublishApi implements PublishPlatformApi {
   private readonly origin: string;
   private readonly repo: string;
   private readonly prNumber: string;
-  private readonly token: string | undefined;
+  private readonly authorization: ForgejoAdapter;
+  private readonly integrationMode: boolean;
   private readonly timeoutMs: number;
   private readonly fetchImpl: FetchLike | undefined;
   /** Fresh diff used to re-validate inline-comment positions. */
@@ -369,6 +371,8 @@ export class ForgejoPublishApi implements PublishPlatformApi {
     repo: string;
     prNumber: string;
     token?: string | undefined;
+    authMethod?: string | undefined;
+    authorizedIntegrationAudience?: string | undefined;
     baseUrl?: string | undefined;
     timeoutMs?: number | undefined;
     fetchImpl?: FetchLike | undefined;
@@ -379,7 +383,17 @@ export class ForgejoPublishApi implements PublishPlatformApi {
     this.origin = parsed.origin;
     this.repo = options.repo;
     this.prNumber = options.prNumber;
-    this.token = options.token;
+    this.integrationMode = (options.authMethod ?? "token").trim().toLowerCase() === "authorized_integration";
+    this.authorization = new ForgejoAdapter({
+      repo: options.repo,
+      prNumber: options.prNumber,
+      baseUrl: options.baseUrl ?? "",
+      token: options.token,
+      authMethod: options.authMethod,
+      authorizedIntegrationAudience: options.authorizedIntegrationAudience,
+      timeoutMs: options.timeoutMs,
+      fetchImpl: options.fetchImpl,
+    });
     this.timeoutMs = options.timeoutMs ?? 25_000;
     this.fetchImpl = options.fetchImpl;
     this.diffProvider = options.diffProvider ?? null;
@@ -389,10 +403,10 @@ export class ForgejoPublishApi implements PublishPlatformApi {
     return `${this.base}/api/v1${path}`;
   }
 
-  private opts(method: string, body?: unknown): Parameters<typeof requestJson>[1] {
+  private async opts(method: string, body?: unknown): Promise<Parameters<typeof requestJson>[1]> {
     return {
       method,
-      token: this.token ? `token ${this.token}` : undefined,
+      token: await this.authorization.authorizationHeaderForRequest(),
       timeoutMs: this.timeoutMs,
       fetchImpl: this.fetchImpl,
       allowedOrigin: this.origin,
@@ -402,7 +416,7 @@ export class ForgejoPublishApi implements PublishPlatformApi {
 
   async getHeadSha(): Promise<string | null> {
     try {
-      const { status, data } = await requestJson(this.url(`/repos/${this.repo}/pulls/${this.prNumber}`), this.opts("GET"));
+      const { status, data } = await requestJson(this.url(`/repos/${this.repo}/pulls/${this.prNumber}`), await this.opts("GET"));
       if (status !== 200 || data === null || typeof data !== "object") return null;
       const head = (data as { head?: { sha?: unknown } }).head;
       return typeof head?.sha === "string" ? head.sha : null;
@@ -413,7 +427,7 @@ export class ForgejoPublishApi implements PublishPlatformApi {
 
   async listIssueComments(): Promise<PublishCommentRef[]> {
     try {
-      const { status, data } = await requestJson(this.url(`/repos/${this.repo}/issues/${this.prNumber}/comments`), this.opts("GET"));
+      const { status, data } = await requestJson(this.url(`/repos/${this.repo}/issues/${this.prNumber}/comments`), await this.opts("GET"));
       return status === 200 && Array.isArray(data) ? (data as PublishCommentRef[]) : [];
     } catch {
       return [];
@@ -423,22 +437,25 @@ export class ForgejoPublishApi implements PublishPlatformApi {
   async upsertStickyComment(marker: string, body: string): Promise<StickyResult> {
     const comments = await this.listIssueComments();
     const matching = comments.filter((c) => typeof c.body === "string" && c.body.includes(marker));
-    matching.sort((a, b) => String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? "")));
+    matching.sort((a, b) => {
+      const updated = String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? ""));
+      if (updated !== 0) return updated;
+      const aId = Number(a.id);
+      const bId = Number(b.id);
+      return Number.isSafeInteger(aId) && Number.isSafeInteger(bId) ? bId - aId : 0;
+    });
     const target = matching[0];
     try {
       if (target === undefined) {
-        const { status, data } = await requestJson(
-          this.url(`/repos/${this.repo}/issues/${this.prNumber}/comments`),
-          this.opts("POST", { body }),
-        );
-        if (status !== 201) return { ok: false, created: false, error: `status ${status}` };
-        const id = (data as { id?: number | string } | null)?.id;
-        return id === undefined ? { ok: true, created: true } : { ok: true, created: true, commentId: id };
+        return await this.createStickyComment(body);
       }
       const { status, data } = await requestJson(
         this.url(`/repos/${this.repo}/issues/comments/${target.id}`),
-        this.opts("PATCH", { body }),
+        await this.opts("PATCH", { body }),
       );
+      // A prior runner account owns the sticky comment. Start a new one
+      // under the integration account if Forgejo refuses the edit.
+      if (this.integrationMode && (status === 403 || status === 404)) return await this.createStickyComment(body);
       if (status !== 200) return { ok: false, created: false, error: `status ${status}` };
       const id = (data as { id?: number | string } | null)?.id ?? target.id;
       return { ok: true, created: false, commentId: id };
@@ -447,9 +464,19 @@ export class ForgejoPublishApi implements PublishPlatformApi {
     }
   }
 
+  private async createStickyComment(body: string): Promise<StickyResult> {
+    const { status, data } = await requestJson(
+      this.url(`/repos/${this.repo}/issues/${this.prNumber}/comments`),
+      await this.opts("POST", { body }),
+    );
+    if (status !== 201) return { ok: false, created: false, error: `status ${status}` };
+    const id = (data as { id?: number | string } | null)?.id;
+    return id === undefined ? { ok: true, created: true } : { ok: true, created: true, commentId: id };
+  }
+
   async listReviews(): Promise<PublishReviewRef[]> {
     try {
-      const { status, data } = await requestJson(this.url(`/repos/${this.repo}/pulls/${this.prNumber}/reviews`), this.opts("GET"));
+      const { status, data } = await requestJson(this.url(`/repos/${this.repo}/pulls/${this.prNumber}/reviews`), await this.opts("GET"));
       return status === 200 && Array.isArray(data) ? (data as PublishReviewRef[]) : [];
     } catch {
       return [];
@@ -469,7 +496,7 @@ export class ForgejoPublishApi implements PublishPlatformApi {
       payload.comments = comments;
     }
     try {
-      const { status } = await requestJson(this.url(`/repos/${this.repo}/pulls/${this.prNumber}/reviews`), this.opts("POST", payload));
+      const { status } = await requestJson(this.url(`/repos/${this.repo}/pulls/${this.prNumber}/reviews`), await this.opts("POST", payload));
       return status === 200 || status === 201 ? { ok: true } : { ok: false, error: `status ${status}` };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };
@@ -517,7 +544,7 @@ export class ForgejoPublishApi implements PublishPlatformApi {
     try {
       const { status } = await requestJson(
         this.url(`/repos/${this.repo}/pulls/${this.prNumber}/reviews/${reviewId}/dismissals`),
-        this.opts("POST", { message }),
+        await this.opts("POST", { message }),
       );
       return status === 200 || status === 201 || status === 204;
     } catch {
@@ -546,7 +573,7 @@ export class ForgejoPublishApi implements PublishPlatformApi {
     try {
       const { status } = await requestJson(
         this.url(`/repos/${this.repo}/issues/${this.prNumber}/labels/${encodeURIComponent(label)}`),
-        this.opts("DELETE"),
+        await this.opts("DELETE"),
       );
       return status === 204 || status === 200;
     } catch {

@@ -5,6 +5,8 @@ import { validateContract } from "../config/contract.js";
 import { loadConfig } from "../config/load-config.js";
 import { commentBodyTriggersCommentCommand, eventLabelName, runPrecheck, type PrecheckOutput } from "../precheck/decide.js";
 import { resolvePlatform } from "../platform/resolve.js";
+import { ForgejoAdapter } from "../platform/forgejo.js";
+import { forgejoTokenFromEnv } from "../platform/forgejo-auth.js";
 import { requireImplementedBackend } from "../platform/tangled.js";
 import { repoScopedUrl } from "../platform/repo-ref.js";
 import { V3_CONTRACT } from "../../.v3-generated/contract.generated.js";
@@ -89,7 +91,9 @@ export function actionStageEnv(env: NodeJS.ProcessEnv): Env {
   // stageEnvFromConfig projects `github-token` (secret-revealed) as GITHUB_TOKEN.
   const token = stage.GITHUB_TOKEN || env.GH_TOKEN || "";
   stage.GH_TOKEN = token;
-  stage.FORGEJO_TOKEN = stage.FORGEJO_TOKEN || token;
+  if ((stage.FORGEJO_AUTH_METHOD ?? "token").trim().toLowerCase() !== "authorized_integration") {
+    stage.FORGEJO_TOKEN = stage.FORGEJO_TOKEN || token;
+  }
   stage.REPO = stage.REPO || env.GITHUB_REPOSITORY || "";
   stage.PR_NUMBER = stage.PR_NUMBER || readEvent(env).prNumber || "";
   const server = env.GITHUB_SERVER_URL ?? "";
@@ -364,6 +368,19 @@ async function maybeClearRereviewLabel(stage: Env, event: StepEvent | undefined)
   }
 }
 
+/** Resolve ancillary Forgejo writes with the same OIDC exchange as API reads. */
+async function forgejoAuthorization(stage: Env): Promise<string | undefined> {
+  const adapter = new ForgejoAdapter({
+    repo: stage.REPO ?? "",
+    prNumber: stage.PR_NUMBER ?? "",
+    baseUrl: stage.FORGEJO_API_URL ?? "",
+    token: forgejoTokenFromEnv(stage),
+    authMethod: stage.FORGEJO_AUTH_METHOD,
+    authorizedIntegrationAudience: stage.FORGEJO_AUTHORIZED_INTEGRATION_AUDIENCE,
+  });
+  return adapter.authorizationHeaderForRequest();
+}
+
 async function clearRereviewLabel(stage: Env): Promise<void> {
   const platform = resolvePlatform(stage.PLATFORM, stage.FORGEJO_API_URL ?? "", stage.GITHUB_SERVER_URL ?? "", stage.TANGLED_REPO_DID ?? "");
   requireImplementedBackend(platform);
@@ -375,10 +392,10 @@ async function clearRereviewLabel(stage: Env): Promise<void> {
     : (stage.GITHUB_API_URL || "https://api.github.com");
   const url = repoScopedUrl(base, stage.REPO ?? "", `/issues/${pr}/labels`, `/${encodeURIComponent(label)}`);
   if (url === null) return;
-  const token = platform === "forgejo" ? (stage.FORGEJO_TOKEN ?? "") : (stage.GH_TOKEN ?? "");
+  const authorization = platform === "forgejo" ? await forgejoAuthorization(stage) : `Bearer ${stage.GH_TOKEN ?? ""}`;
   await fetch(url, {
     method: "DELETE",
-    headers: { Authorization: platform === "forgejo" ? `token ${token}` : `Bearer ${token}`, Accept: "application/json" },
+    headers: { ...(authorization ? { Authorization: authorization } : {}), Accept: "application/json" },
     signal: AbortSignal.timeout(15000),
   });
 }
@@ -419,11 +436,11 @@ async function postCommentAckReaction(stage: Env, commentId: number | string): P
     : (stage.GITHUB_API_URL || "https://api.github.com");
   const url = repoScopedUrl(base, stage.REPO ?? "", `/issues/comments/${encodeURIComponent(String(commentId))}/reactions`);
   if (url === null) return;
-  const token = platform === "forgejo" ? (stage.FORGEJO_TOKEN ?? "") : (stage.GH_TOKEN ?? "");
+  const authorization = platform === "forgejo" ? await forgejoAuthorization(stage) : `Bearer ${stage.GH_TOKEN ?? ""}`;
   await fetch(url, {
     method: "POST",
     headers: {
-      Authorization: platform === "forgejo" ? `token ${token}` : `Bearer ${token}`,
+      ...(authorization ? { Authorization: authorization } : {}),
       Accept: "application/json",
       "Content-Type": "application/json",
     },
@@ -451,7 +468,7 @@ async function postForkPrCommentReply(stage: Env): Promise<void> {
     : (stage.GITHUB_API_URL || "https://api.github.com");
   const url = repoScopedUrl(base, stage.REPO ?? "", `/issues/${pr}/comments`);
   if (url === null) return;
-  const token = platform === "forgejo" ? (stage.FORGEJO_TOKEN ?? "") : (stage.GH_TOKEN ?? "");
+  const authorization = platform === "forgejo" ? await forgejoAuthorization(stage) : `Bearer ${stage.GH_TOKEN ?? ""}`;
   const command = (stage.REREVIEW_COMMAND ?? "").trim();
   const namesCommand =
     command.length > 0 && command.length <= 80 && /^[\x21-\x7E]+$/.test(command) && !command.includes("`");
@@ -461,7 +478,7 @@ async function postForkPrCommentReply(stage: Env): Promise<void> {
   await fetch(url, {
     method: "POST",
     headers: {
-      Authorization: platform === "forgejo" ? `token ${token}` : `Bearer ${token}`,
+      ...(authorization ? { Authorization: authorization } : {}),
       Accept: "application/json",
       "Content-Type": "application/json",
     },

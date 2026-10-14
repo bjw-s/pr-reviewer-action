@@ -544,6 +544,17 @@ test("forgejo reads fail (not empty) when the authorized-integration credential 
   }
 });
 
+test("an explicit Forgejo token method ignores a configured OIDC audience", async () => {
+  const { fetchImpl, seen } = recorder(() => json([]));
+  const adapter = new ForgejoAdapter({
+    repo: "o/r", prNumber: "5", baseUrl: "https://git.example",
+    token: "pat", authMethod: "token", authorizedIntegrationAudience: "aud", fetchImpl,
+  });
+  assert.equal((await adapter.listPrFiles()).ok, true);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0]!.auth, "token pat");
+});
+
 test("forgejo ghApi joins the translated /api/v1 path to the bare base exactly once", async () => {
   const { fetchImpl, seen } = recorder(() => json({ number: 1 }));
   const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example", token: "t", fetchImpl });
