@@ -9,6 +9,7 @@ import { buildAdapter, buildPublishApi, precheckMain } from "../src/run/entrypoi
 import { buildPlatformReadAdapter } from "../src/run/platform.js";
 
 const OIDC_URL = "https://oidc.example/token?job=1";
+const OIDC_REQUEST_URL = `${OIDC_URL}&audience=aud`;
 const FORGE_URL = "https://forge.example";
 
 function integrationInputs() {
@@ -50,7 +51,7 @@ test("action integration identity reaches precheck, review, CI, and publish", as
   const fetchImpl: FetchLike = async (input, init) => {
     const url = String(input);
     seen.push({ url, auth: new Headers(init?.headers).get("authorization"), redirect: init?.redirect });
-    if (url.startsWith(OIDC_URL)) return Response.json({ value: "integration-jwt" });
+    if (url === OIDC_REQUEST_URL) return Response.json({ value: "integration-jwt" });
     if (url.endsWith("/comments") && init?.method === "POST") return Response.json({ id: 12 }, { status: 201 });
     if (url.endsWith("/pulls/9")) return Response.json({ number: 9, head: { sha: "abc" } });
     if (url.endsWith("/commits/abc/status")) return Response.json({ state: "success", statuses: [] });
@@ -68,10 +69,10 @@ test("action integration identity reaches precheck, review, CI, and publish", as
   assert.deepEqual(await api.upsertStickyComment("<!-- m -->", "<!-- m -->\nreview"), {
     ok: true, created: true, commentId: 12,
   });
-  const forgeCalls = seen.filter(({ url }) => url.startsWith(FORGE_URL));
+  const forgeCalls = seen.filter(({ url }) => new URL(url).origin === FORGE_URL);
   assert.ok(forgeCalls.length >= 5);
   assert.ok(forgeCalls.every(({ auth, redirect }) => auth === "Bearer integration-jwt" && redirect === "manual"));
-  assert.ok(seen.filter(({ url }) => url.startsWith(OIDC_URL)).every(({ auth }) => auth === "bearer runner-oidc"));
+  assert.ok(seen.filter(({ url }) => url === OIDC_REQUEST_URL).every(({ auth }) => auth === "bearer runner-oidc"));
   assert.ok(seen.every(({ auth }) => auth !== "token runner-forgejo" && auth !== "token runner-github"));
 }));
 
@@ -123,7 +124,7 @@ test("Forgejo rejecting the exchanged JWT fails before model work", async (t) =>
   t.mock.method(globalThis, "fetch", async (input: string | URL, init?: RequestInit) => {
     const url = String(input);
     seen.push({ url, auth: new Headers(init?.headers).get("authorization") });
-    return url.startsWith(OIDC_URL)
+    return url === OIDC_REQUEST_URL
       ? Response.json({ value: "integration-jwt" })
       : Response.json({ message: "denied" }, { status: forgeStatus });
   });
@@ -145,7 +146,7 @@ test("Forgejo publisher renews its integration JWT before a delayed write", asyn
   t.mock.method(Date, "now", () => now);
   const fetchImpl: FetchLike = async (input, init) => {
     const url = String(input);
-    if (url.startsWith(OIDC_URL)) return Response.json({ value: `jwt-${++exchanges}` });
+    if (url === OIDC_REQUEST_URL) return Response.json({ value: `jwt-${++exchanges}` });
     forgeAuth.push(new Headers(init?.headers).get("authorization") ?? "");
     if (init?.method === "POST") return Response.json({ id: 1 }, { status: 201 });
     return Response.json({ head: { sha: "abc" } });
@@ -167,7 +168,7 @@ test("integration re-review updates its new sticky comment after an account chan
   const writes: string[] = [];
   const fetchImpl: FetchLike = async (input, init) => {
     const url = String(input);
-    if (url.startsWith(OIDC_URL)) return Response.json({ value: "integration-jwt" });
+    if (url === OIDC_REQUEST_URL) return Response.json({ value: "integration-jwt" });
     assert.equal(new Headers(init?.headers).get("authorization"), "Bearer integration-jwt");
     if (url.endsWith("/user")) return Response.json({ login: "new-bot" });
     if (init?.method === "GET") return Response.json(comments);
@@ -198,7 +199,7 @@ test("integration selects the newest owned marker even when a foreign marker was
   const writes: string[] = [];
   const fetchImpl: FetchLike = async (input, init) => {
     const url = String(input);
-    if (url.startsWith(OIDC_URL)) return Response.json({ value: "integration-jwt" });
+    if (url === OIDC_REQUEST_URL) return Response.json({ value: "integration-jwt" });
     if (url.endsWith("/user")) return Response.json({ login: "new-bot" });
     if (init?.method === "GET") return Response.json([
       { id: 20, body: "<!-- m -->\nforeign", updated_at: "2026-10-14T12:00:00Z", user: { login: "old-bot" } },
@@ -222,7 +223,7 @@ test("integration finds an owned sticky comment beyond the first Forgejo page", 
   const seen: string[] = [];
   const fetchImpl: FetchLike = async (input, init) => {
     const url = String(input);
-    if (url.startsWith(OIDC_URL)) return Response.json({ value: "integration-jwt" });
+    if (url === OIDC_REQUEST_URL) return Response.json({ value: "integration-jwt" });
     if (url.endsWith("/user")) return Response.json({ login: "new-bot" });
     if (url.includes("/comments?limit=50&page=1")) return Response.json([
       { id: 7, body: "<!-- m -->\nold", user: { login: "old-bot" } },
@@ -249,7 +250,7 @@ test("integration never creates a duplicate after an uncertain list, owner, or e
     const writes: string[] = [];
     const fetchImpl: FetchLike = async (input, init) => {
       const url = String(input);
-      if (url.startsWith(OIDC_URL)) return Response.json({ value: "integration-jwt" });
+      if (url === OIDC_REQUEST_URL) return Response.json({ value: "integration-jwt" });
       if (url.endsWith("/user")) return failure === "owner"
         ? Response.json({}, { status: 503 }) : Response.json({ login: "new-bot" });
       if (init?.method === "GET") {
@@ -279,7 +280,7 @@ test("publisher refuses a Forgejo redirect without forwarding the JWT", async ()
   const fetchImpl: FetchLike = async (input, init) => {
     const url = String(input);
     seen.push({ url, redirect: init?.redirect });
-    if (url.startsWith(OIDC_URL)) return Response.json({ value: "integration-jwt" });
+    if (url === OIDC_REQUEST_URL) return Response.json({ value: "integration-jwt" });
     assert.equal(new Headers(init?.headers).get("authorization"), "Bearer integration-jwt");
     return new Response(null, { status: 302, headers: { location: "https://unrelated.example/collect" } });
   };
@@ -305,13 +306,13 @@ test("Forgejo ancillary writes use the integration JWT and refuse another origin
       url, method: init?.method ?? "GET", auth: new Headers(init?.headers).get("authorization"),
       redirect: init?.redirect, body: typeof init?.body === "string" ? init.body : null,
     });
-    return url.startsWith(OIDC_URL) ? Response.json({ value: "integration-jwt" }) : Response.json({});
+    return url === OIDC_REQUEST_URL ? Response.json({ value: "integration-jwt" }) : Response.json({});
   };
   t.mock.method(globalThis, "fetch", fetchImpl);
   await forgejoAncillaryWrite(stage, `${base}/repos/o/r/issues/9/labels/ai-review`, "DELETE");
   await forgejoAncillaryWrite(stage, `${base}/repos/o/r/issues/comments/4/reactions`, "POST", { content: "eyes" });
   await forgejoAncillaryWrite(stage, `${base}/repos/o/r/issues/9/comments`, "POST", { body: "fork reply" });
-  const forgeCalls = seen.filter(({ url }) => url.startsWith(FORGE_URL));
+  const forgeCalls = seen.filter(({ url }) => new URL(url).origin === FORGE_URL);
   assert.deepEqual(forgeCalls.map(({ method, body }) => [method, body]), [
     ["DELETE", null], ["POST", '{"content":"eyes"}'], ["POST", '{"body":"fork reply"}'],
   ]);
@@ -325,7 +326,7 @@ test("Forgejo ancillary writes use the integration JWT and refuse another origin
     forgejoAncillaryWrite(stage, "https://unrelated.example/collect", "POST", { body: "secret" }),
     /outside the validated platform base/,
   );
-  assert.equal(seen.some(({ url }) => url.startsWith("https://unrelated.example")), false);
+  assert.equal(seen.some(({ url }) => new URL(url).origin === "https://unrelated.example"), false);
 }));
 
 test("Forgejo ancillary write blocks a redirect before its JWT can leave the forge", async (t) => withOidcEnv(async () => {
@@ -333,7 +334,7 @@ test("Forgejo ancillary write blocks a redirect before its JWT can leave the for
   const fetchImpl: FetchLike = async (input, init) => {
     const url = String(input);
     seen.push({ url, redirect: init?.redirect });
-    return url.startsWith(OIDC_URL)
+    return url === OIDC_REQUEST_URL
       ? Response.json({ value: "integration-jwt" })
       : new Response(null, { status: 302, headers: { location: "https://unrelated.example/collect" } });
   };
