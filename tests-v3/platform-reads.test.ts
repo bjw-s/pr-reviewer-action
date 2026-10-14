@@ -152,6 +152,25 @@ test("Forgejo run-jobs normalization is pagination-conservative and joins the ex
   ), false);
 });
 
+test("Forgejo v16 jobs without html_url prove a single job only for the queried run", () => {
+  const job = { id: 42, run_id: 987654, name: "review", status: "running" };
+  assert.deepEqual(normalizeForgejoRunJobs([job], 50, "987654"), {
+    state: "single", count: 1, exact: true, htmlUrl: null,
+  });
+  assert.deepEqual(normalizeForgejoRunJobs([job], 50, "987655"), {
+    state: "unavailable", count: null, exact: false,
+  });
+  assert.deepEqual(normalizeForgejoRunJobs([{ run_id: 987654 }], 50, "987654"), {
+    state: "unavailable", count: null, exact: false,
+  });
+  assert.deepEqual(normalizeForgejoRunJobs({ has_more: true, jobs: [job] }, 50, "987654"), {
+    state: "multi", count: 2, exact: false,
+  });
+  assert.deepEqual(normalizeForgejoRunJobs([job, { ...job, id: 43 }], 50, "987654"), {
+    state: "multi", count: 2, exact: true,
+  });
+});
+
 test("Forgejo self-status candidates are pending-only, unique, repo-scoped, and same-origin", () => {
   const runNumbers = ["", "abc", " 171447 "];
   const runRepo = "o/r";
