@@ -137,13 +137,25 @@ export class ForgejoAdapter implements PlatformReadAdapter {
     return this.authorizationHeader();
   }
 
-  /** Resolve the Authorization header (port of `_resolve_auth_header`):
-   * authorized-integration mode with no explicit token uses the OIDC JWT;
-   * an explicit token always wins; token="" opts out of authentication. */
+  /** Surface exchange and Forgejo authorization failures before reads can fold them into empty data. */
+  async preflightAuthentication(): Promise<void> {
+    if (!this.isAuthorizedIntegrationMode()) return;
+    const { status } = await requestText(
+      this.repoUrl("/pulls/", this.prNumber),
+      await this.options("application/json"),
+    );
+    if (status !== 200) {
+      throw new PlatformRequestError(
+        `Forgejo authorized-integration credential check failed with status ${status}`,
+        status,
+        "integration-auth",
+      );
+    }
+  }
+
+  /** The selected method owns authentication even if a caller supplies a token. */
   private async authorizationHeader(): Promise<string | undefined> {
     if (this.isAuthorizedIntegrationMode()) {
-      if (this.token === "") return undefined;
-      if (this.token) return `token ${this.token}`;
       return `Bearer ${await this.getJwt()}`;
     }
     if (!this.token) return undefined;

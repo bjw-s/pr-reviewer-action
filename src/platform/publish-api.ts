@@ -6,10 +6,8 @@
  * - GraphQL-backed operations (minimized state, thread resolution) are
  *   GitHub-only; Forgejo degrades explicitly (the caller logs a note and
  *   continues — a missing GraphQL API is never a publish failure).
- * - Sticky-comment selection is shared semantics: the latest comment
- *   CONTAINING the marker (by updated_at), never "last comment by the
- *   current user" — the v2 `--edit-last` behavior picked a different
- *   comment on multi-bot repos and diverged from Forgejo.
+ * - Sticky-comment selection requires the marker. On Forgejo integration
+ *   identity changes, the newest marker owned by the current account wins.
  * - Forgejo review creation re-validates inline-comment positions against
    the fresh diff and drops anything that no longer anchors.
  * - Every operation reports failure instead of throwing where the v2 seam
@@ -25,6 +23,7 @@ export interface PublishCommentRef {
   id: number | string;
   updated_at?: string;
   body?: string;
+  user?: { login?: string } | null;
 }
 
 export interface PublishReviewRef {
@@ -427,25 +426,52 @@ export class ForgejoPublishApi implements PublishPlatformApi {
 
   async listIssueComments(): Promise<PublishCommentRef[]> {
     try {
-      const { status, data } = await requestJson(this.url(`/repos/${this.repo}/issues/${this.prNumber}/comments`), await this.opts("GET"));
-      return status === 200 && Array.isArray(data) ? (data as PublishCommentRef[]) : [];
+      return await this.listIssueCommentsStrict();
     } catch {
       return [];
     }
   }
 
+  /** Upsert must distinguish a failed list from an empty one to avoid duplicates. */
+  private async listIssueCommentsStrict(): Promise<PublishCommentRef[]> {
+    const comments: PublishCommentRef[] = [];
+    for (let page = 1; page <= 20; page += 1) {
+      const { status, data } = await requestJson(
+        this.url(`/repos/${this.repo}/issues/${this.prNumber}/comments?limit=50&page=${page}`),
+        await this.opts("GET"),
+      );
+      if (status !== 200 || !Array.isArray(data)) throw new Error(`Forgejo issue comments read failed (status ${status})`);
+      comments.push(...(data as PublishCommentRef[]));
+      if (data.length < 50) return comments;
+    }
+    throw new Error("Forgejo issue comments exceeded the pagination limit");
+  }
+
   async upsertStickyComment(marker: string, body: string): Promise<StickyResult> {
-    const comments = await this.listIssueComments();
-    const matching = comments.filter((c) => typeof c.body === "string" && c.body.includes(marker));
-    matching.sort((a, b) => {
-      const updated = String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? ""));
-      if (updated !== 0) return updated;
-      const aId = Number(a.id);
-      const bId = Number(b.id);
-      return Number.isSafeInteger(aId) && Number.isSafeInteger(bId) ? bId - aId : 0;
-    });
-    const target = matching[0];
     try {
+      const comments = await this.listIssueCommentsStrict();
+      const matching = comments.filter((c) => typeof c.body === "string" && c.body.includes(marker));
+      matching.sort((a, b) => {
+        const updated = String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? ""));
+        if (updated !== 0) return updated;
+        const aId = Number(a.id);
+        const bId = Number(b.id);
+        return Number.isSafeInteger(aId) && Number.isSafeInteger(bId) ? bId - aId : 0;
+      });
+      let target = matching[0];
+      if (this.integrationMode && target !== undefined) {
+        const identity = await this.authorization.authenticatedIdentity();
+        if (identity === null) return { ok: false, created: false, error: "Forgejo sticky comment owner could not be verified" };
+        const author = (comment: PublishCommentRef): string | null => {
+          const login = comment.user?.login;
+          return typeof login === "string" && login.trim() !== "" ? login.toLowerCase() : null;
+        };
+        const current = identity.toLowerCase();
+        target = matching.find((comment) => author(comment) === current);
+        if (target === undefined && matching.some((comment) => author(comment) === null)) {
+          return { ok: false, created: false, error: "Forgejo sticky comment ownership is unknown" };
+        }
+      }
       if (target === undefined) {
         return await this.createStickyComment(body);
       }
@@ -453,9 +479,6 @@ export class ForgejoPublishApi implements PublishPlatformApi {
         this.url(`/repos/${this.repo}/issues/comments/${target.id}`),
         await this.opts("PATCH", { body }),
       );
-      // A prior runner account owns the sticky comment. Start a new one
-      // under the integration account if Forgejo refuses the edit.
-      if (this.integrationMode && (status === 403 || status === 404)) return await this.createStickyComment(body);
       if (status !== 200) return { ok: false, created: false, error: `status ${status}` };
       const id = (data as { id?: number | string } | null)?.id ?? target.id;
       return { ok: true, created: false, commentId: id };

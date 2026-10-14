@@ -50,11 +50,15 @@ test("action stage env keeps token fallback while integration mode selects OIDC"
     "INPUT_AI-BASE-URL": "https://llm.example.invalid/v1",
     "INPUT_AI-MODEL": "m",
     "INPUT_GITHUB-TOKEN": "runner",
+    FORGEJO_TOKEN: "injected-forgejo-token",
+    GITHUB_TOKEN: "injected-github-token",
     GITHUB_SERVER_URL: "https://forge.example.invalid",
   };
   const tokenMode = actionStageEnv(base);
-  assert.equal(tokenMode.FORGEJO_TOKEN, "runner");
-  assert.equal(forgejoTokenFromEnv(tokenMode), "runner");
+  assert.equal(tokenMode.FORGEJO_TOKEN, "injected-forgejo-token");
+  assert.equal(forgejoTokenFromEnv(tokenMode), "injected-forgejo-token");
+  assert.equal(actionStageEnv({ ...base, "INPUT_FORGEJO-TOKEN": "explicit-pat" }).FORGEJO_TOKEN, "explicit-pat");
+  assert.equal(actionStageEnv({ ...base, FORGEJO_TOKEN: "" }).FORGEJO_TOKEN, "runner");
 
   const integrationMode = actionStageEnv({
     ...base,
@@ -63,6 +67,15 @@ test("action stage env keeps token fallback while integration mode selects OIDC"
   });
   assert.equal(integrationMode.FORGEJO_TOKEN, "");
   assert.equal(forgejoTokenFromEnv(integrationMode), undefined);
+  assert.throws(
+    () => actionStageEnv({
+      ...base,
+      "INPUT_FORGEJO-AUTH-METHOD": "authorized_integration",
+      "INPUT_FORGEJO-AUTHORIZED-INTEGRATION-AUDIENCE": "aud",
+      "INPUT_FORGEJO-TOKEN": "explicit-pat",
+    }),
+    /forgejo-token.*cannot be set/,
+  );
 });
 
 test("multiline outputs use a delimiter the value cannot forge", () => {

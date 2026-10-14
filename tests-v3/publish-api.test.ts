@@ -136,7 +136,7 @@ test("Forgejo publisher exchanges OIDC identity and posts as the integration", a
     ]);
     const api = new ForgejoPublishApi({
       repo: "o/r", prNumber: "9", baseUrl: "https://forge.example",
-      authMethod: "authorized_integration", authorizedIntegrationAudience: "aud", fetchImpl,
+      token: "static-token", authMethod: "authorized_integration", authorizedIntegrationAudience: "aud", fetchImpl,
     });
     assert.deepEqual(await api.upsertStickyComment("<!-- m -->", "<!-- m -->\nnew"), {
       ok: true, created: true, commentId: 12,
@@ -152,8 +152,8 @@ test("Forgejo publisher exchanges OIDC identity and posts as the integration", a
 
 test("Forgejo integration creates a new sticky comment when the prior account owns the old one", async () => {
   const { fetchImpl, calls } = recorder([
-    ["GET https://forge.example/api/v1/repos/o/r/issues/9/comments", 200, [{ id: 7, body: "<!-- m -->\nold" }]],
-    ["PATCH https://forge.example/api/v1/repos/o/r/issues/comments/7", 403, {}],
+    ["GET https://forge.example/api/v1/repos/o/r/issues/9/comments", 200, [{ id: 7, body: "<!-- m -->\nold", user: { login: "old-bot" } }]],
+    ["GET https://forge.example/api/v1/user", 200, { login: "new-bot" }],
     ["POST https://forge.example/api/v1/repos/o/r/issues/9/comments", 201, { id: 12 }],
   ]);
   const previous = { url: process.env.ACTIONS_ID_TOKEN_REQUEST_URL, token: process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN };
@@ -171,7 +171,7 @@ test("Forgejo integration creates a new sticky comment when the prior account ow
       ok: true, created: true, commentId: 12,
     });
     assert.deepEqual(calls.map(({ method, auth }) => [method, auth]), [
-      ["GET", "Bearer jwt"], ["PATCH", "Bearer jwt"], ["POST", "Bearer jwt"],
+      ["GET", "Bearer jwt"], ["GET", "Bearer jwt"], ["POST", "Bearer jwt"],
     ]);
   } finally {
     if (previous.url === undefined) delete process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
@@ -204,7 +204,7 @@ test("Forgejo sticky comment reuse chooses the newest comment when timestamps ti
     ok: true, created: false, commentId: 12,
   });
   assert.deepEqual(calls.map(({ method, url }) => [method, url]), [
-    ["GET", "https://forge.example/api/v1/repos/o/r/issues/9/comments"],
+    ["GET", "https://forge.example/api/v1/repos/o/r/issues/9/comments?limit=50&page=1"],
     ["PATCH", "https://forge.example/api/v1/repos/o/r/issues/comments/12"],
   ]);
 });

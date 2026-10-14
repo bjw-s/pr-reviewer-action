@@ -20,6 +20,10 @@ test("Forgejo Authorized Integration requires an audience and refuses an explici
     /forgejo-authorized-integration-audience.*required/,
   );
   assert.throws(
+    () => loadConfig(contract, { ...base, "forgejo-authorized-integration-audience": "   " }),
+    /forgejo-authorized-integration-audience.*required/,
+  );
+  assert.throws(
     () => loadConfig(contract, { ...base, "forgejo-authorized-integration-audience": "aud", "forgejo-token": "secret" }),
     /forgejo-token.*cannot be set.*token' mode/,
   );

@@ -175,9 +175,11 @@ export async function precheckMain(env: NodeJS.ProcessEnv): Promise<number> {
   const stage = prNumber !== undefined && (env.PR_NUMBER ?? "") === ""
     ? { ...env, PR_NUMBER: prNumber }
     : env;
+  const adapter = buildAdapter(stage);
+  await adapter.preflightAuthentication?.();
   const output = await runPrecheck({
     env: stage as Record<string, string>,
-    adapter: buildAdapter(stage),
+    adapter,
     ...(event !== undefined ? { event: event as never } : {}),
     ...(eventHeadSha !== undefined ? { eventHeadSha } : {}),
   });

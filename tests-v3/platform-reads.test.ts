@@ -534,13 +534,36 @@ test("forgejo reads fail (not empty) when the authorized-integration credential 
   delete process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
   try {
     const { fetchImpl, seen } = recorder(() => json([]));
-    const adapter = new ForgejoAdapter({ repo: "o/r", prNumber: "5", baseUrl: "https://git.example", authorizedIntegrationAudience: "aud", fetchImpl });
+    const adapter = new ForgejoAdapter({
+      repo: "o/r", prNumber: "5", baseUrl: "https://git.example",
+      token: "static-token", authMethod: "authorized_integration", authorizedIntegrationAudience: "aud", fetchImpl,
+    });
     assert.equal((await adapter.listPrFiles()).ok, false);
     assert.equal((await adapter.listReviewThreads()).ok, false);
     assert.equal(seen.length, 0);
   } finally {
     if (saved.url !== undefined) process.env.ACTIONS_ID_TOKEN_REQUEST_URL = saved.url;
     if (saved.token !== undefined) process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN = saved.token;
+  }
+});
+
+test("Forgejo integration reads use OIDC even when a direct caller supplies a token", async () => {
+  const saved = { url: process.env.ACTIONS_ID_TOKEN_REQUEST_URL, token: process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN };
+  process.env.ACTIONS_ID_TOKEN_REQUEST_URL = "https://oidc.example/token?job=1";
+  process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN = "runner-oidc";
+  try {
+    const { fetchImpl, seen } = recorder((url) => json(url.origin === "https://oidc.example" ? { value: "integration-jwt" } : []));
+    const adapter = new ForgejoAdapter({
+      repo: "o/r", prNumber: "5", baseUrl: "https://git.example",
+      token: "static-token", authMethod: "authorized_integration", authorizedIntegrationAudience: "aud", fetchImpl,
+    });
+    assert.equal((await adapter.listPrFiles()).ok, true);
+    assert.deepEqual(seen.map(({ auth }) => auth), ["bearer runner-oidc", "Bearer integration-jwt"]);
+  } finally {
+    if (saved.url === undefined) delete process.env.ACTIONS_ID_TOKEN_REQUEST_URL;
+    else process.env.ACTIONS_ID_TOKEN_REQUEST_URL = saved.url;
+    if (saved.token === undefined) delete process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN;
+    else process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN = saved.token;
   }
 });
 
