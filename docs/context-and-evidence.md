@@ -254,8 +254,10 @@ uses `FORGEJO_RUN_NUMBER` or `GITHUB_RUN_NUMBER` to find a pending status whose
 URL is scoped to this repository and the runner's origin (`FORGEJO_API_URL`, or
 `GITHUB_SERVER_URL` fallback). It excludes that status only when the run-jobs
 API, queried with numeric `FORGEJO_RUN_ID` (or `GITHUB_RUN_ID` fallback), proves
-the run has exactly one job and the job's `html_url` path exactly matches the
-status `target_url` path. Run IDs are never status-URL candidates. Multi-job,
+the run has exactly one job. When the job has an `html_url`, its path must
+exactly match the status `target_url` path. Forgejo v16 jobs omit `html_url`;
+then the job's `run_id` must match the queried run and the status must target a
+job page for this repository and run number. Run IDs are never status-URL candidates. Multi-job,
 mismatched, and unavailable cases leave statuses visible. Automatic discovery
 requires Forgejo v16.0+, which introduced the run-jobs API; older instances warn
 immediately and fall back to bounded waiting. Set `CI_STATUS_CONTEXT` on older

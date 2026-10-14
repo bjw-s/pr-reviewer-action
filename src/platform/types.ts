@@ -120,7 +120,8 @@ export interface ExternalChecksOptions extends CiBoundOptions {
   selfRunRepo?: string | undefined;
   /** Mutable per-gate discovery cache filled by the Forgejo adapter in auto
    * mode. `runJobs` is retried while unknown and cached after a definitive
-   * single/multi/unavailable result; `runJobHtmlUrl` is the exact-join key. */
+   * single/multi/unavailable result. `runJobHtmlUrl` is the exact-join key
+   * when supplied; null with a single job means the API job's run ID matched. */
   selfStatusDiscovery?: ForgejoSelfStatusDiscovery | undefined;
   /** v3 CI gate (#706 PR 6, deliberate divergence): a transient read failure
    * of EITHER underlying read — no response (timeout, transport error,

@@ -397,13 +397,15 @@ export interface ForgejoSelfStatusMatches {
 }
 
 export type ForgejoRunJobsNormalization =
-  | { state: "single"; count: 1; exact: true; htmlUrl: string }
+  | { state: "single"; count: 1; exact: true; htmlUrl: string | null }
   | { state: "multi"; count: number; exact: boolean }
   | { state: "unavailable"; count: null; exact: false };
 
 /** Normalize the Forgejo jobs API's documented plain-array shape and
- * defensive total_count envelopes. Never call a truncated page single-job. */
-export function normalizeForgejoRunJobs(data: unknown, pageSize = 50): ForgejoRunJobsNormalization {
+ * defensive total_count envelopes. Never call a truncated page single-job.
+ * Forgejo v16 jobs have no html_url; accept a single job without one only
+ * when its database run ID matches the run queried by the caller. */
+export function normalizeForgejoRunJobs(data: unknown, pageSize = 50, expectedRunId = ""): ForgejoRunJobsNormalization {
   const envelope = isPlainObject(data) ? data : null;
   const jobs = Array.isArray(data) ? data : envelope && Array.isArray(envelope.jobs) ? envelope.jobs : null;
   if (jobs === null) return { state: "unavailable", count: null, exact: false };
@@ -427,10 +429,17 @@ export function normalizeForgejoRunJobs(data: unknown, pageSize = 50): ForgejoRu
   if (jobs.length > 1) return { state: "multi", count: jobs.length, exact: true };
   if (jobs.length === 0) return { state: "unavailable", count: null, exact: false };
   const only = jobs[0];
-  if (!isPlainObject(only) || typeof only.html_url !== "string") {
+  if (!isPlainObject(only)) {
     return { state: "unavailable", count: null, exact: false };
   }
-  return { state: "single", count: 1, exact: true, htmlUrl: only.html_url };
+  if (typeof only.html_url === "string") {
+    return { state: "single", count: 1, exact: true, htmlUrl: only.html_url };
+  }
+  if (only.html_url === undefined && typeof only.id === "number" && Number.isSafeInteger(only.id) && only.id > 0
+    && typeof only.run_id === "number" && Number.isSafeInteger(only.run_id) && String(only.run_id) === expectedRunId) {
+    return { state: "single", count: 1, exact: true, htmlUrl: null };
+  }
+  return { state: "unavailable", count: null, exact: false };
 }
 
 /** Both URLs must be same-origin (when absolute) and resolve to the same
@@ -439,6 +448,13 @@ export function forgejoJobStatusPathsMatch(jobHtmlUrl: string, targetUrl: string
   const jobPath = forgejoTargetPath(jobHtmlUrl, selfRunOrigin);
   const statusPath = forgejoTargetPath(targetUrl, selfRunOrigin);
   return jobPath !== null && statusPath !== null && jobPath === statusPath;
+}
+
+/** A URL-only status candidate may name a run page. The v16 single-job
+ * fallback must identify a job page before excluding its pending status. */
+export function forgejoStatusTargetsJob(targetUrl: string, selfRunOrigin: string): boolean {
+  const path = forgejoTargetPath(targetUrl, selfRunOrigin);
+  return path !== null && /\/actions\/runs\/\d+\/jobs\/\d+(?:\/|$)/.test(path);
 }
 
 /** Find pending Forgejo statuses scoped to this repository and runner origin.

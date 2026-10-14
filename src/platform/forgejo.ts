@@ -6,6 +6,7 @@ import {
   groupForgejoReviewThreads,
   forgejoSelfStatusMatches,
   forgejoJobStatusPathsMatch,
+  forgejoStatusTargetsJob,
   normalizeForgejoRunJobs,
   normalizeExternalChecks,
   normalizeForgejoCommitStatus,
@@ -542,7 +543,7 @@ export class ForgejoAdapter implements PlatformReadAdapter {
     } catch {
       return null;
     }
-    const result = normalizeForgejoRunJobs(decoded, FORGEJO_RUN_JOBS_PAGE_SIZE);
+    const result = normalizeForgejoRunJobs(decoded, FORGEJO_RUN_JOBS_PAGE_SIZE, runId);
     if (result.state === "unavailable" && options.selfStatusDiscovery) {
       options.selfStatusDiscovery.runJobsUnavailableReason = "run-jobs response could not prove the run's job count";
     }
@@ -592,8 +593,10 @@ export class ForgejoAdapter implements PlatformReadAdapter {
       discovery.matchCount = matches.count;
       discovery.context = matches.context;
       if (!ambiguous && matches.count === 1 && discovery.runJobs === "single"
-        && targetUrl !== null && discovery.runJobHtmlUrl !== null
-        && forgejoJobStatusPathsMatch(discovery.runJobHtmlUrl, targetUrl, options.selfRunOrigin ?? "")) {
+        && targetUrl !== null
+        && (discovery.runJobHtmlUrl === null
+          ? forgejoStatusTargetsJob(targetUrl, options.selfRunOrigin ?? "")
+          : forgejoJobStatusPathsMatch(discovery.runJobHtmlUrl, targetUrl, options.selfRunOrigin ?? ""))) {
         discovery.found = true;
         excludeIndex = matches.index ?? undefined;
       }
