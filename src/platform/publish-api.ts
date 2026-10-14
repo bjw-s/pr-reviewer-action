@@ -23,7 +23,7 @@ export interface PublishCommentRef {
   id: number | string;
   updated_at?: string;
   body?: string;
-  user?: { login?: string } | null;
+  user?: { id?: number | string; login?: string } | null;
 }
 
 export interface PublishReviewRef {
@@ -353,6 +353,18 @@ export function forgejoReviewEvent(event: string): string {
   return "COMMENT";
 }
 
+/** Forgejo generates integration audiences as `u:<owner ID>:<UUID>`. */
+function integrationOwnerId(audience: string | undefined): string | null {
+  const match = /^u:([1-9]\d*):[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.exec(audience ?? "");
+  return match?.[1] ?? null;
+}
+
+function commentAuthorId(comment: PublishCommentRef): string | null {
+  const id = comment.user?.id;
+  if (typeof id === "number") return Number.isSafeInteger(id) && id > 0 ? String(id) : null;
+  return typeof id === "string" && /^[1-9]\d*$/.test(id) ? id : null;
+}
+
 export class ForgejoPublishApi implements PublishPlatformApi {
   readonly platform = "forgejo" as const;
   private readonly base: string;
@@ -361,6 +373,7 @@ export class ForgejoPublishApi implements PublishPlatformApi {
   private readonly prNumber: string;
   private readonly authorization: ForgejoAdapter;
   private readonly integrationMode: boolean;
+  private readonly integrationOwnerId: string | null;
   private readonly timeoutMs: number;
   private readonly fetchImpl: FetchLike | undefined;
   /** Fresh diff used to re-validate inline-comment positions. */
@@ -383,6 +396,7 @@ export class ForgejoPublishApi implements PublishPlatformApi {
     this.repo = options.repo;
     this.prNumber = options.prNumber;
     this.integrationMode = (options.authMethod ?? "token").trim().toLowerCase() === "authorized_integration";
+    this.integrationOwnerId = integrationOwnerId(options.authorizedIntegrationAudience);
     this.authorization = new ForgejoAdapter({
       repo: options.repo,
       prNumber: options.prNumber,
@@ -460,13 +474,22 @@ export class ForgejoPublishApi implements PublishPlatformApi {
       });
       let target = matching[0];
       if (this.integrationMode && target !== undefined) {
-        const identity = await this.authorization.authenticatedIdentity();
-        if (identity === null) return { ok: false, created: false, error: "Forgejo sticky comment owner could not be verified" };
-        const author = (comment: PublishCommentRef): string | null => {
-          const login = comment.user?.login;
-          return typeof login === "string" && login.trim() !== "" ? login.toLowerCase() : null;
-        };
-        const current = identity.toLowerCase();
+        let author: (comment: PublishCommentRef) => string | null;
+        let current: string;
+        if (this.integrationOwnerId !== null) {
+          // The audience identifies the account Forgejo authenticates as.
+          // /user needs a separate user scope that repository-scoped JWTs lack.
+          author = commentAuthorId;
+          current = this.integrationOwnerId;
+        } else {
+          const identity = await this.authorization.authenticatedIdentity();
+          if (identity === null) return { ok: false, created: false, error: "Forgejo sticky comment owner could not be verified" };
+          author = (comment) => {
+            const login = comment.user?.login;
+            return typeof login === "string" && login.trim() !== "" ? login.toLowerCase() : null;
+          };
+          current = identity.toLowerCase();
+        }
         target = matching.find((comment) => author(comment) === current);
         if (target === undefined && matching.some((comment) => author(comment) === null)) {
           return { ok: false, created: false, error: "Forgejo sticky comment ownership is unknown" };

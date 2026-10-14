@@ -164,24 +164,25 @@ test("Forgejo publisher renews its integration JWT before a delayed write", asyn
 }));
 
 test("integration re-review updates its new sticky comment after an account change", async () => withOidcEnv(async () => {
-  const comments = [{ id: 7, body: "<!-- m -->\nold", updated_at: "2026-10-14T08:00:00Z", user: { login: "old-bot" } }];
+  const audience = "u:42:12345678-1234-1234-1234-123456789abc";
+  const comments = [{ id: 7, body: "<!-- m -->\nold", updated_at: "2026-10-14T08:00:00Z", user: { id: 41, login: "old-bot" } }];
   const writes: string[] = [];
   const fetchImpl: FetchLike = async (input, init) => {
     const url = String(input);
-    if (url === OIDC_REQUEST_URL) return Response.json({ value: "integration-jwt" });
+    if (url === `${OIDC_URL}&audience=${encodeURIComponent(audience)}`) return Response.json({ value: "integration-jwt" });
     assert.equal(new Headers(init?.headers).get("authorization"), "Bearer integration-jwt");
-    if (url.endsWith("/user")) return Response.json({ login: "new-bot" });
+    if (url.endsWith("/user")) return Response.json({}, { status: 403 });
     if (init?.method === "GET") return Response.json(comments);
     writes.push(`${init?.method} ${url}`);
     if (init?.method === "POST") {
-      comments.push({ id: 12, body: "<!-- m -->\nnew", updated_at: "2026-10-14T09:00:00Z", user: { login: "new-bot" } });
+      comments.push({ id: 12, body: "<!-- m -->\nnew", updated_at: "2026-10-14T09:00:00Z", user: { id: 42, login: "new-bot" } });
       return Response.json({ id: 12 }, { status: 201 });
     }
     return Response.json({ id: 12 });
   };
   const api = new ForgejoPublishApi({
     repo: "o/r", prNumber: "9", baseUrl: FORGE_URL,
-    authMethod: "authorized_integration", authorizedIntegrationAudience: "aud", fetchImpl,
+    authMethod: "authorized_integration", authorizedIntegrationAudience: audience, fetchImpl,
   });
   assert.deepEqual(await api.upsertStickyComment("<!-- m -->", "<!-- m -->\nnew"), {
     ok: true, created: true, commentId: 12,
@@ -193,6 +194,76 @@ test("integration re-review updates its new sticky comment after an account chan
     `POST ${FORGE_URL}/api/v1/repos/o/r/issues/9/comments`,
     `PATCH ${FORGE_URL}/api/v1/repos/o/r/issues/comments/12`,
   ]);
+}));
+
+test("scoped integration reuses its sticky comment without read:user", async () => withOidcEnv(async () => {
+  const audience = "u:42:12345678-1234-1234-1234-123456789abc";
+  const comments = [
+    { id: 7, body: "<!-- m -->\nold account", updated_at: "2026-10-14T12:00:00Z", user: { id: 41, login: "old-bot" } },
+    { id: 12, body: "<!-- m -->\ncurrent", updated_at: "2026-10-14T09:00:00Z", user: { id: 42, login: "new-bot" } },
+  ];
+  const writes: string[] = [];
+  const fetchImpl: FetchLike = async (input, init) => {
+    const url = String(input);
+    if (url === `${OIDC_URL}&audience=${encodeURIComponent(audience)}`) return Response.json({ value: "integration-jwt" });
+    assert.equal(new Headers(init?.headers).get("authorization"), "Bearer integration-jwt");
+    if (url.endsWith("/user")) return Response.json({ message: "user scope required" }, { status: 403 });
+    if (init?.method === "GET") return Response.json(comments);
+    writes.push(`${init?.method} ${url}`);
+    return Response.json({ id: 12 });
+  };
+  const api = new ForgejoPublishApi({
+    repo: "o/r", prNumber: "9", baseUrl: FORGE_URL,
+    authMethod: "authorized_integration", authorizedIntegrationAudience: audience, fetchImpl,
+  });
+  assert.deepEqual(await api.upsertStickyComment("<!-- m -->", "<!-- m -->\nreview"), {
+    ok: true, created: false, commentId: 12,
+  });
+  assert.deepEqual(writes, [`PATCH ${FORGE_URL}/api/v1/repos/o/r/issues/comments/12`]);
+}));
+
+test("scoped integration refuses a marker with unknown author ID", async () => withOidcEnv(async () => {
+  const audience = "u:42:12345678-1234-1234-1234-123456789abc";
+  const writes: string[] = [];
+  const fetchImpl: FetchLike = async (input, init) => {
+    const url = String(input);
+    if (url === `${OIDC_URL}&audience=${encodeURIComponent(audience)}`) return Response.json({ value: "integration-jwt" });
+    if (url.endsWith("/user")) return Response.json({}, { status: 403 });
+    if (init?.method === "GET") return Response.json([{ id: 7, body: "<!-- m -->\nold", user: { login: "unknown" } }]);
+    writes.push(`${init?.method} ${url}`);
+    return Response.json({ id: 7 });
+  };
+  const api = new ForgejoPublishApi({
+    repo: "o/r", prNumber: "9", baseUrl: FORGE_URL,
+    authMethod: "authorized_integration", authorizedIntegrationAudience: audience, fetchImpl,
+  });
+  assert.deepEqual(await api.upsertStickyComment("<!-- m -->", "<!-- m -->\nreview"), {
+    ok: false, created: false, error: "Forgejo sticky comment ownership is unknown",
+  });
+  assert.deepEqual(writes, []);
+}));
+
+test("scoped integration does not duplicate a marker when its edit is denied or missing", async () => withOidcEnv(async () => {
+  const audience = "u:42:12345678-1234-1234-1234-123456789abc";
+  for (const status of [403, 404]) {
+    const writes: string[] = [];
+    const fetchImpl: FetchLike = async (input, init) => {
+      const url = String(input);
+      if (url === `${OIDC_URL}&audience=${encodeURIComponent(audience)}`) return Response.json({ value: "integration-jwt" });
+      if (url.endsWith("/user")) return Response.json({}, { status: 403 });
+      if (init?.method === "GET") return Response.json([{ id: 12, body: "<!-- m -->\nowned", user: { id: 42 } }]);
+      writes.push(`${init?.method} ${url}`);
+      return Response.json({}, { status });
+    };
+    const api = new ForgejoPublishApi({
+      repo: "o/r", prNumber: "9", baseUrl: FORGE_URL,
+      authMethod: "authorized_integration", authorizedIntegrationAudience: audience, fetchImpl,
+    });
+    assert.deepEqual(await api.upsertStickyComment("<!-- m -->", "<!-- m -->\nreview"), {
+      ok: false, created: false, error: `status ${status}`,
+    });
+    assert.deepEqual(writes, [`PATCH ${FORGE_URL}/api/v1/repos/o/r/issues/comments/12`]);
+  }
 }));
 
 test("integration selects the newest owned marker even when a foreign marker was updated later", async () => withOidcEnv(async () => {
